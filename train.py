@@ -1,59 +1,70 @@
-import copy
-import numpy as np
+from typing import Dict, List
 import os
-from DQN import Agent
+import json
+
+import numpy as np
 import gym
+
+from torch.utils.tensorboard import SummaryWriter
+
+from DQN import Agent
+
+# Init. tensorboard summary writer
+tb = SummaryWriter(log_dir=os.path.abspath('data/tensorboard'))
+
+
+def encode_states(env: gym.Env, state: int) -> np.ndarray:
+    encoded_state = np.zeros(env.observation_space.n) + 1e-4
+    encoded_state[state] = 1.0
+    return encoded_state / encoded_state.sum()
+
 
 if __name__ == '__main__':
 
     # Init. Environment
-    env = gym.make('FrozenLake8x8-v1')
+    env = gym.make("FrozenLake8x8-v1")
     env.reset()
 
     # Init. Datapath
-    data_path = os.path.dirname(os.path.abspath(__file__)) + '/data/'
+    data_path = os.path.abspath('data')
 
     # Init. Training
+    n_games: int = 1500
     best_score = -np.inf
-    score_history = []
-    avg_history = []
-    n_games = 2000
+    score_history: List[float] = [] * n_games
+    avg_history: List[float] = [] * n_games
+    logging_info: List[Dict[str, float]] = [] * n_games
 
     # Init. Agent
-    states = 1
-    actions = env.action_space.n
-    agent = Agent(states, actions, data_path)
+    agent = Agent(env=env, n_games=n_games)
 
     for i in range(n_games):
-        score = 0
-        done = False
+        score: float = 0.0
+        done: bool = False
 
         # Initial Reset of Environment
         state = env.reset()
+        state = encode_states(env, state)
 
         while not done:
-            # Render
-            # env.render()
-
-            # Choose agent based action & make a transition
             action = agent.choose_action(state)
-            next_state, reward, done, info = env.step(action)
+            next_state, reward, done, _ = env.step(action)
+            next_state = encode_states(env, next_state)
 
-            agent.store_transition(state, action, reward, next_state, done)
+            agent.memory.add(state, action, reward, next_state, done)
 
-            state = copy.deepcopy(next_state)
+            state = next_state
             score += reward
 
-            # Optimize the agent
-            agent.learn()
+            agent.optimize()
 
         score_history.append(score)
-        avg_score = np.mean(score_history[-100:])
+        avg_score: float = np.mean(score_history[-100:])
         avg_history.append(avg_score)
 
         if avg_score > best_score:
             best_score = avg_score
-            agent.save_models()
+            agent.save_models(data_path)
             print(f'Episode:{i}'
                   f'\t ACC. Rewards: {score:3.2f}'
                   f'\t AVG. Rewards: {avg_score:3.2f}'
@@ -63,9 +74,23 @@ if __name__ == '__main__':
                   f'\t ACC. Rewards: {score:3.2f}'
                   f'\t AVG. Rewards: {avg_score:3.2f}')
 
-        # Save the score log
-        np.save(data_path + 'score_history', score_history, allow_pickle=False)
-        np.save(data_path + 'avg_history', avg_history, allow_pickle=False)
+        episode_info = {
+            'Episode': i,
+            'Total Episodes': n_games,
+            'Epidosic Summed Rewards': score,
+            'Moving Mean of Episodic Rewards': avg_score
+        }
 
-    # Close render
-    env.close()
+        logging_info.append(episode_info)
+
+        # Add info. to tensorboard
+        tb.add_scalars('training_rewards',
+                       {'Epidosic Summed Rewards': score,
+                        'Moving Mean of Episodic Rewards': avg_score}, i)
+
+        # Dump .json
+        with open(os.path.join(data_path, 'training_info.json'), 'w', encoding='utf8') as file:
+            json.dump(logging_info, file, indent=4, ensure_ascii=False)
+
+    # Close tensorboard writer
+    tb.close()

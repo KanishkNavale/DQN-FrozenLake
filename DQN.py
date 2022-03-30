@@ -1,124 +1,153 @@
-import torch as T
-import torch.nn as nn
+from typing import Tuple
+import os
+import numpy as np
+from gym import Env
+
+import torch
 import torch.nn.functional as F
 import torch.optim as optim
-import numpy as np
 
-device = T.device("cuda:0" if T.cuda.is_available() else "cpu:0")
+from replay_buffers.Uniform import ReplayBuffer
+
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 
-class DeepQNetwork(nn.Module):
-    def __init__(self, lr, input_dims, n_actions, density):
-        super(DeepQNetwork, self).__init__()
+class DuelingDeepQNetwork(torch.nn.Module):
+    def __init__(self,
+                 input_dimension: int,
+                 action_dimension: int,
+                 density: int = 1024,
+                 learning_rate: float = 1e-3,
+                 name: str = '') -> None:
+        super(DuelingDeepQNetwork, self).__init__()
 
-        # Shapes for the network
-        self.input_dims = input_dims
-        self.n_actions = n_actions
+        self.name = name
 
-        # Density of the network
-        self.fc1 = nn.Linear(self.input_dims, density)
-        self.fc2 = nn.Linear(density, density)
-        self.fc3 = nn.Linear(density, self.n_actions)
+        self.H1 = torch.nn.Linear(input_dimension, density)
+        self.H2 = torch.nn.Linear(density, density)
+        self.H3 = torch.nn.Linear(density, density)
+        self.H4 = torch.nn.Linear(density, density)
+        self.H5 = torch.nn.Linear(density, action_dimension)
 
-        # Optimizer for the Network
-        self.optimizer = optim.Adam(self.parameters(), lr=lr)
-        self.loss = nn.MSELoss()
+        self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
         self.to(device)
 
-    def forward(self, state):
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
-        actions = self.fc3(x)
-        return actions
+    def forward(self, state) -> torch.Tensor:
 
-    def save_model(self, path):
-        T.save(self.state_dict(), path + 'DQN')
+        state = F.relu(self.H1(state))
+        state = F.relu(self.H2(state))
+        state = F.relu(self.H3(state))
+        state = F.relu(self.H4(state))
+        value = torch.tanh(self.H5(state))
+
+        return value
+
+    def pick_action(self, state):
+        with torch.no_grad():
+            Q = self.forward(state)
+            action = torch.argmax(Q, dim=-1)
+            action = action.cpu().numpy()
+            return action.item()
+
+    def save_checkpoint(self, path: str = ''):
+        torch.save(self.state_dict(), os.path.join(path, self.name + '.pth'))
+
+    def load_checkpoint(self, path: str = ''):
+        self.load_state_dict(torch.load(os.path.join(path, self.name + '.pth')))
 
 
-class Agent:
-    def __init__(self, input_dims, n_actions, datapath):
+class Agent():
+    def __init__(self,
+                 env: Env,
+                 n_games: int = 1,
+                 batch_size: int = 128,
+                 learning_rate: float = 1e-4,
+                 gamma: float = 0.99,
+                 epsilon: float = 1.0,
+                 eps_min: float = 0.001,
+                 eps_dec: float = 1e-3,
+                 training: bool = True):
 
-        self.gamma = 0.99
-        self.epsilon = 1.0
-        self.eps_min = 0.05
-        self.eps_dec = 5e-4
-        self.lr = 1e-3
-        self.action_space = [i for i in range(n_actions)]
-        self.mem_size = 100000
-        self.batch_size = 32
-        self.mem_cntr = 0
-        self.iter_cntr = 0
+        self.env = env
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.lr = learning_rate
 
-        self.datapath = datapath
+        self.action_dim = env.action_space.n
+        self.input_dim = env.observation_space.n
+        self.batch_size = batch_size
 
-        self.replace_target = 100
-        self.PolicyNetwork = DeepQNetwork(
-            self.lr, input_dims, n_actions, density=256)
+        self.eps_min = eps_min
+        self.eps_dec = eps_dec
 
-        self.state_memory = np.zeros(
-            (self.mem_size, input_dims), dtype=np.float32)
-        self.new_state_memory = np.zeros(
-            (self.mem_size, input_dims), dtype=np.float32)
-        self.action_memory = np.zeros(self.mem_size, dtype=np.int)
-        self.reward_memory = np.zeros(self.mem_size, dtype=np.float)
-        self.terminal_memory = np.zeros(self.mem_size, dtype=np.bool)
+        self.training = training
 
-    def store_transition(self, state, action, reward, state_, terminal):
-        index = self.mem_cntr % self.mem_size
-        self.state_memory[index] = state
-        self.new_state_memory[index] = state_
-        self.reward_memory[index] = reward
-        self.action_memory[index] = action
-        self.terminal_memory[index] = terminal
+        self.memory = ReplayBuffer(self.env._max_episode_steps * n_games)
 
-        self.mem_cntr += 1
+        self.online_network = DuelingDeepQNetwork(input_dimension=self.input_dim,
+                                                  action_dimension=self.action_dim,
+                                                  learning_rate=learning_rate,
+                                                  name='OnlinePolicy')
 
-    def choose_action(self, observation):
-        self.PolicyNetwork.eval()
-        if np.random.random() > self.epsilon:
-            state = T.tensor([observation], dtype=T.float32).to(device)
-            actions = self.PolicyNetwork.forward(state)
-            action = T.argmax(actions).item()
-            self.PolicyNetwork.train()
+    def choose_action(self, observation) -> int:
+        if self.training:
+            if np.random.rand(1) > self.epsilon:
+                self.online_network.eval()
+                state = torch.as_tensor(observation, dtype=torch.float32, device=device)
+                with torch.no_grad():
+                    action = self.online_network.pick_action(state)
+            else:
+                action = self.env.action_space.sample()
+
+            return action
+
         else:
-            action = np.random.choice(self.action_space)
+            state = torch.as_tensor(observation, dtype=torch.float32, device=device)
+            with torch.no_grad():
+                return self.online_network.pick_action(state)
 
-        return action
+    def store_transition(self, state, action, reward, next_state, done) -> None:
+        self.memory.add(state, action, reward, next_state, done)
 
-    def save_models(self):
-        self.PolicyNetwork.save_model(self.datapath)
+    def epsilon_update(self) -> None:
+        '''Decrease epsilon iteratively'''
+        if self.epsilon > self.eps_min:
+            self.epsilon -= self.eps_dec
 
-    def learn(self):
-        if self.mem_cntr < self.batch_size:
+    def save_models(self, path) -> None:
+        self.online_network.save_checkpoint(path)
+
+    def load_models(self, path) -> None:
+        self.online_network.load_checkpoint(path)
+
+    def optimize(self):
+        if self.memory.__len__() < self.batch_size:
             return
 
-        self.PolicyNetwork.optimizer.zero_grad()
+        states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
 
-        # Extract Batches from the replay memory
-        max_mem = min(self.mem_cntr, self.mem_size)
+        states = torch.as_tensor(np.vstack(states), dtype=torch.float32, device=device)
+        rewards = torch.as_tensor(np.vstack(rewards), dtype=torch.float32, device=device)
+        dones = torch.as_tensor(np.vstack(dones), dtype=torch.float32, device=device)
+        actions = torch.as_tensor(np.vstack(actions), dtype=torch.float32, device=device)
+        next_states = torch.as_tensor(np.vstack(next_states), dtype=torch.float32, device=device)
 
-        batch = np.random.choice(max_mem, self.batch_size, replace=False)
-        batch_index = np.arange(self.batch_size, dtype=np.int)
+        self.online_network.train()
 
-        states = T.tensor(
-            self.state_memory[batch], dtype=T.float32).to(device)
-        new_states = T.tensor(
-            self.new_state_memory[batch], dtype=T.float32).to(device)
-        rewards = T.tensor(
-            self.reward_memory[batch], dtype=T.float32).to(device)
-        terminals = T.tensor(self.terminal_memory[batch]).to(device)
+        with torch.no_grad():
+            next_q_values = self.online_network(next_states)
+            next_q_values, _ = next_q_values.max(dim=1)
+            next_q_values = next_q_values.reshape(-1, 1)
+            target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
 
-        # Optimize the network
-        q_eval = self.PolicyNetwork.forward(states)
-        q_next = self.PolicyNetwork.forward(new_states)
-        q_next[terminals] = 0.0
-        q_target = rewards + self.gamma * T.max(q_next, dim=1)[0]
+        current_q_values = self.online_network(states)
+        current_q_values = torch.gather(current_q_values, dim=1, index=actions.long())
 
-        loss = self.PolicyNetwork.loss(
-            q_target, T.max(q_eval, dim=1)[0]).to(device)
+        # Compute Huber loss (less sensitive to outliers)
+        loss = F.huber_loss(current_q_values, target_q_values)
+
+        self.online_network.optimizer.zero_grad()
         loss.backward()
-        self.PolicyNetwork.optimizer.step()
+        self.online_network.optimizer.step()
 
-        self.iter_cntr += 1
-        self.epsilon = self.epsilon - self.eps_dec \
-            if self.epsilon > self.eps_min else self.eps_min
+        self.epsilon_update()
