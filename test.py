@@ -7,7 +7,7 @@ import numpy as np
 import gym
 from tqdm import tqdm
 
-from DQN import Agent
+from DDQN import Agent
 from train import encode_states
 
 

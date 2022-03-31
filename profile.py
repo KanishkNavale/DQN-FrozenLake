@@ -7,14 +7,15 @@ import gym
 
 import matplotlib.pyplot as plt
 
-from DQN import Agent
+from DDQN import Agent
 from train import encode_states
 
 
 def predict_value(agent: Agent, state: np.ndarray) -> float:
-    state = torch.as_tensor([state], dtype=torch.float32)
-    value = agent.online_network(state).detach().numpy()
-    return np.max(value)
+    with torch.no_grad():
+        state = torch.as_tensor(state, dtype=torch.float32, device=agent.network_one.device)
+        value = torch.max(agent.network_one.forward(state)) + torch.max(agent.network_zero.forward(state))
+        return value.item()
 
 
 if __name__ == "__main__":
@@ -28,7 +29,6 @@ if __name__ == "__main__":
 
     agent = Agent(env=env, training=False)
     agent.load_models(data_path)
-    agent.online_network.to(torch.device("cpu"))
 
     with open(os.path.join(data_path, 'training_info.json')) as f:
         train_data = json.load(f)
@@ -48,9 +48,10 @@ if __name__ == "__main__":
         for j in range(state_value.shape[0]):
             state_value[i, j] = predict_value(agent, encode_states(env, k))
             k += 1
+    state_value /= state_value.max()
 
     # Generate graphs
-    fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(15, 5))
+    fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(16, 5))
 
     axes[0].plot(score, alpha=0.5, label='Episodic summation')
     axes[0].plot(average, label='Moving mean of 100 episodes')
@@ -67,10 +68,10 @@ if __name__ == "__main__":
 
     axes[2].imshow(state_value)
     axes[2].set_xlabel('state')
-    axes[2].xaxis.set_visible(False)
-    axes[2].yaxis.set_visible(False)
     axes[2].set_title("Agent Value Estimation")
-    fig.colorbar(axes[2].imshow(state_value))
+    for x in range(state_value.shape[0]):
+        for y in range(state_value.shape[1]):
+            axes[2].text(x, y, np.around(state_value[y, x], 2), c='white', weight='bold', ha='center', va='center')
 
     fig.tight_layout()
-    plt.savefig(os.path.join(data_path, 'DQN Agent Profiling.png'))
+    plt.savefig(os.path.join(data_path, 'DDQN Agent Profiling.png'))

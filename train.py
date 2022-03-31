@@ -7,14 +7,23 @@ import gym
 
 from torch.utils.tensorboard import SummaryWriter
 
-from DQN import Agent
+from DDQN import Agent
 
 # Init. tensorboard summary writer
 tb = SummaryWriter(log_dir=os.path.abspath('data/tensorboard'))
 
 
 def encode_states(env: gym.Env, state: int) -> np.ndarray:
-    encoded_state = np.zeros(env.observation_space.n) + 1e-4
+    """Converts a state of int format to one-hot encoded state of dimension: N states
+
+    Args:
+        env (gym.Env): gym environment
+        state (int): state
+
+    Returns:
+        np.ndarray: one-hot encoded state
+    """
+    encoded_state = np.zeros(env.observation_space.n)
     encoded_state[state] = 1.0
     return encoded_state / encoded_state.sum()
 
@@ -29,7 +38,7 @@ if __name__ == '__main__':
     data_path = os.path.abspath('data')
 
     # Init. Training
-    n_games: int = 1500
+    n_games: int = 2000
     best_score = -np.inf
     score_history: List[float] = [] * n_games
     avg_history: List[float] = [] * n_games
@@ -58,6 +67,7 @@ if __name__ == '__main__':
 
             agent.optimize()
 
+        agent.n_games = 1
         score_history.append(score)
         avg_score: float = np.mean(score_history[-100:])
         avg_history.append(avg_score)
